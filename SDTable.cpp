@@ -7,6 +7,7 @@
 #include "SDTable.h"
 
 #include <cstring>
+#include <unistd.h>  // Für fsync()
 
 namespace database {
     SDTable::SDTable() {
@@ -97,10 +98,20 @@ namespace database {
         // Set position to beginning of file
         rewind(file);
         // Write static & dynamic content to file
-        return fwrite(&head, 1, sizeof(StaticHead), file) ==
+        bool success = fwrite(&head, 1, sizeof(StaticHead), file) ==
                    sizeof(StaticHead) &&
                fwrite(head.elements.data(), sizeof(Element), head.elementCount,
                       file) == head.elementCount;
+        
+        // Force data physically to disk
+        if (success) {
+            fflush(file);              // Flush stdio buffer
+            if (fsync(fileno(file)) != 0) {  // Flush kernel + disk cache
+                return false;
+            }
+        }
+        
+        return success;
       }
       return false;
     }
@@ -193,7 +204,15 @@ namespace database {
                 removeLine((unsigned int) line);
                 return -1;
             }
-            // Save Head
+            
+            // Write data to disk
+            fflush(file);
+            if (fsync(fileno(file)) != 0) {
+                removeLine((unsigned int) line);
+                return -1;
+            }
+            
+            // Save Head (already done in requestLine(), but again for safety)
             if (!writeHead()) {
                 return -1;
             }
@@ -218,6 +237,14 @@ namespace database {
                 }
             }
 
+            // Write data to disk
+            fflush(file);
+            if (fsync(fileno(file)) != 0) {
+                removeLine((unsigned int) line);
+                return -1;
+            }
+
+            // Save Head (already done in requestLine(), but again for safety)
             if (!writeHead()) {
                 return -1;
             }
@@ -230,6 +257,13 @@ namespace database {
       if (head.freedLineCount) {
         uint32_t line;
         head.freedLineCount--;
+        
+        // Persist header change immediately!
+        if (!writeHead()) {
+          head.freedLineCount++;  // Rollback
+          return -1;
+        }
+        
         setFilePos(head.freedLineCount, FREEDLINE);
         // If an error occur return -1
         if (fread(&line, 4, 1, file) != 1) {
@@ -239,6 +273,14 @@ namespace database {
       } else {
         head.bodySize += head.lineSize;
         head.lineCount++;
+        
+        // Persist header change immediately!
+        if (!writeHead()) {
+          head.bodySize -= head.lineSize;  // Rollback
+          head.lineCount--;
+          return -1;
+        }
+        
         return head.lineCount - 1;
       }
     }
@@ -272,6 +314,14 @@ namespace database {
         // TODO Override content with zeros
         head.lineCount--;
         head.bodySize -= head.lineSize;
+        
+        // Persist header change immediately!
+        if (!writeHead()) {
+          head.lineCount++;  // Rollback
+          head.bodySize += head.lineSize;
+          return false;
+        }
+        
         return true;
       }
     }
@@ -285,12 +335,33 @@ namespace database {
           return false;
         }
       }
+      
+      // Write data to disk
+      fflush(file);
+      if (fsync(fileno(file)) != 0) {
+        return false;
+      }
+      
       // Mark as FreedLine in Footer
       setFilePos(head.freedLineCount, FREEDLINE);
       if (fwrite(&line, 4, 1, file) != 1) {
         return false;
       }
+      
+      // Write footer to disk
+      fflush(file);
+      if (fsync(fileno(file)) != 0) {
+        return false;
+      }
+      
       head.freedLineCount++;
+      
+      // Persist header change immediately!
+      if (!writeHead()) {
+        head.freedLineCount--;  // Rollback
+        return false;
+      }
+      
       return true;
     }
 
@@ -345,8 +416,18 @@ namespace database {
       // Set file position
       setFilePos(line, CONTENT, offset);
       // Write content to file
-      return fwrite(container, 1, head.elements[element].size, file) ==
+      bool success = fwrite(container, 1, head.elements[element].size, file) ==
              head.elements[element].size;
+      
+      // Write data to disk
+      if (success) {
+        fflush(file);
+        if (fsync(fileno(file)) != 0) {
+          return false;
+        }
+      }
+      
+      return success;
     }
 
     bool SDTable::getLine(unsigned int line, void *container) const {
@@ -362,7 +443,17 @@ namespace database {
         return false;
       }
       setFilePos(line);
-      return fwrite(container, 1, head.lineSize, file) == head.lineSize;
+      bool success = fwrite(container, 1, head.lineSize, file) == head.lineSize;
+      
+      // Write data to disk
+      if (success) {
+        fflush(file);
+        if (fsync(fileno(file)) != 0) {
+          return false;
+        }
+      }
+      
+      return success;
     }
 
     bool SDTable::isFreed(unsigned int line) const { return checkFreed(line); }
