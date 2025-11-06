@@ -7,7 +7,13 @@
 #include "SDTable.h"
 
 #include <cstring>
-#include <unistd.h>  // Für fsync()
+#if defined(_WIN32)
+#include <io.h>
+#define fsync _commit
+#define fileno _fileno
+#else
+#include <unistd.h>
+#endif
 
 namespace database {
     SDTable::SDTable() {
